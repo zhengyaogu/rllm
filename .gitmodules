@@ -1,4 +1,4 @@
 [submodule "verl"]
 	path = verl
-	url = https://github.com/agentica-project/verl
+	url = https://github.com/zhengyaogu/verl
 	branch = main
