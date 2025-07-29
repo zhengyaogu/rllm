@@ -405,6 +405,28 @@ class AgentPPOTrainer(RayPPOTrainer):
                     if self.config.trainer.save_freq > 0 and self.global_steps % self.config.trainer.save_freq == 0:
                         with _timer("save_checkpoint", timing_raw):
                             self._save_checkpoint()
+                # TODO 1: 
+                # - put batches in the same epoch into a loader;
+                # - figure out what loader the system uses
+                # - from how loader is implemented for critics, it seems DataProto itself can act as a loader
+                # - the loader needs to output intermediate states instead of full trajectories
+                # TODO 2: 
+                # - use the loader to train a critic
+                # - need to implement a critic with a classification loss (based onverl.workers.critic.dp_critic.DataParallelPPOCritic)
+                # TODO 3:
+                # The discriminator can be trained as a critic. However, there is a few differences:
+                # the discriminator should not be used to guide policy gradient in the first epoch.
+                # when `update_critic` is called, the discriminator is trained using 0/1 outcomes not values
+                # batch["token_level_scores"] stores 0/1 outcomes but only equals 1 for the last step
+                # the discriminator needs a broadcasted version of batch["token_level_scores"]
+                # so we need a new field in DataProto to store the broadcasted token_level_scores
+                # this method should be called `broadcast_token_level_scores`, implemented in AgentPPOTrainer
+                # TODO 4:
+                # Another thing I need to do is to design a seperate flag `use_discriminator`
+                # 1. compute discriminator value for each step: similar to `critic.compute_values()`
+                # 2. the computed values are incorporated into `batch`
+                # 3. need to define a new function in `core_algorithm.py` that binds discriminator values and GRPO advantage
+
 
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
