@@ -388,6 +388,11 @@ class AgentPPOTrainer(RayPPOTrainer):
                             critic_output = self.critic_wg.update_critic(batch)
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
+                        if self.config.trainer.log_debug:
+                            logger.log_embedding(data={
+                                "critic/unreduced_bce_loss": critic_output.meta_info["critic/unreduced_bce_loss"].detach().cpu(),
+                                "response_mask": batch.batch["response_mask"].detach().cpu(),
+                            }, step=self.global_steps)
 
                     # implement critic warmup
                     if self.config.trainer.critic_warmup <= self.global_steps:
