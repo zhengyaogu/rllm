@@ -194,7 +194,7 @@ class AgentPPOTrainer(RayPPOTrainer):
                         metrics.update(generate_metrics)
 
                     # compute values
-                    if self.use_critic:
+                    if self.use_critic or self.use_discriminator:
                         with _timer("values", timing_raw):
                             values = self.critic_wg.compute_values(batch)
                             batch = batch.union(values)
@@ -361,6 +361,7 @@ class AgentPPOTrainer(RayPPOTrainer):
                             adv_estimator=self.config.algorithm.adv_estimator,
                             gamma=self.config.algorithm.gamma,
                             lam=self.config.algorithm.lam,
+                            alpha=self.config.algorithm.alpha,
                             mask_truncated_samples=self.config.algorithm.mask_truncated_samples,
                             clip_advantages=self.config.algorithm.clip_advantages,
                         )

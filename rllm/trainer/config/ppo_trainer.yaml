@@ -237,6 +237,7 @@ custom_reward_function:
 algorithm:
   gamma: 1.0
   lam: 1.0
+  alpha: 1.0
   adv_estimator: gae
   norm_adv_by_std_in_grpo: True
   use_kl_in_reward: False
