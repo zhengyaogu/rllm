@@ -200,3 +200,6 @@ rllm/data/train/code/livecodebench.json
 rllm/data/train/code/kodcode.json
 rllm/data/train/code/primeintellect.json
 rllm/data/train/code/primeintellect_dedupe.json
+
+# Ignore file containing secrets
+rllm/examples/math_dgpo/prepare_math_data.py
