@@ -7,10 +7,10 @@ from rllm.rewards.reward_fn import math_reward_fn
 from rllm.trainer.agent_trainer import AgentTrainer
 
 
-@hydra.main(config_path=".", config_name="dgpo", version_base=None)
+@hydra.main(config_path=".", config_name="grpo", version_base=None)
 def main(config):
-    train_dataset = DatasetRegistry.load_dataset("deepscaler_math", "train")
-    test_dataset = DatasetRegistry.load_dataset("aime2024", "test")
+    train_dataset = DatasetRegistry.load_dataset("big_math", "train")
+    test_dataset = DatasetRegistry.load_dataset("big_math", "test")
 
     agent_args = {"accumulate_thinking": True}
     env_args = {

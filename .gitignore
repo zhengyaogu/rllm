@@ -179,6 +179,8 @@ cython_debug/
 **/checkpoints/
 
 # Ignore parquet files.
+rllm/data/*
+rllm/registry/*
 data/* 
 
 rllm/data/preprocess/*.json

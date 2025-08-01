@@ -1,4 +1,5 @@
 from datasets import load_dataset
+from huggingface_hub import login
 
 from rllm.data.dataset import DatasetRegistry
 
@@ -23,14 +24,14 @@ def prepare_math_data():
         x["source"] in ["gsm8k", "amc_aime", "math", "omnimath", "openmath", "harp"]
     ))
     train_dataset = train_dataset.map(preprocess_big_math, with_indices=True)
-    test_dataset = train_dataset.map(preprocess_big_math, with_indices=True)
+    test_dataset = test_dataset.map(preprocess_big_math, with_indices=True)
 
-    train_dataset = DatasetRegistry.register_dataset("big_math_train", train_dataset, "train")
-    test_dataset = DatasetRegistry.register_dataset("big_math_test", test_dataset, "test")
+    train_dataset = DatasetRegistry.register_dataset("big_math", train_dataset, "train")
+    test_dataset = DatasetRegistry.register_dataset("big_math", test_dataset, "test")
     return train_dataset, test_dataset
 
 
 if __name__ == "__main__":
     train_dataset, test_dataset = prepare_math_data()
-    print(train_dataset)
-    print(test_dataset)
+    print(len(train_dataset))
+    print(len(test_dataset))
