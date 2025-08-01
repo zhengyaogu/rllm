@@ -262,7 +262,7 @@ trainer:
   total_epochs: 30
   total_training_steps: null
   project_name: verl_examples
-  experiment_name: gsm8k
+  experiment_name: dgpo
   logger: [ 'console', 'wandb' ]
   log_debug: True
   log_val_generations: 0
@@ -270,7 +270,7 @@ trainer:
   validation_data_dir: null # directory for logging the validation data, no dump if null
   nnodes: 1
   n_gpus_per_node: 8
-  save_freq: -1
+  save_freq: 50
   # auto: find the last ckpt to resume. If can't find, start from scratch
   resume_mode: auto # or disable or resume_path if resume_from_path is set
   resume_from_path: null
@@ -287,7 +287,7 @@ trainer:
   # RLLM arguments
   rejection_sample: False # Reject sample prompts that all succeed or all fail (0 signal for GRPO due to normalization).
   rejection_sample_multiplier: 2 # Multiple the training batch size by this factor to account for rejection sampling reduction.
-  n_training_gpus_per_node: 4 # For verl-pipeline.
+  n_training_gpus_per_node: 2 # For verl-pipeline.
 
 ray_init:
   num_cpus: null # `None` means using all CPUs, which might cause hang if limited in systems like SLURM. Please set to a number allowed then.
@@ -298,7 +298,7 @@ env:
   env_args: {}
 
 agent:
-  name: miniwobagent
+  name: mathagent
   max_steps: 20
   async_engine: True
   trajectory_timeout: null

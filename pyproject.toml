@@ -73,6 +73,7 @@ dependencies = [
     "wandb",
     "pybind11",
     "gym",
+    "math-verify"
 
     # Development and testing
     "pytest",

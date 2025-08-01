@@ -13,7 +13,7 @@ class MathAgent(BaseAgent):
         """
         Initialize the MathAgent.
         """
-        self.instruction = "Let's think step by step, and put your final answer within \\boxed{}."
+        self.instruction = "You are a math expert. Given the following math problem, provide your solution in Latex format. Think step by step, and always format your final answer in perfect LaTeX \\boxed{{final_answer}} format."
         self._trajectory = Trajectory()
         self.messages = []
         self.accumulate_thinking = accumulate_thinking

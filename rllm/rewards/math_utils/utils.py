@@ -9,6 +9,7 @@ import re
 import sympy
 from pylatexenc import latex2text
 from sympy.parsing import sympy_parser
+from math_verify import verify
 
 
 # Dan Hendrycks' code
@@ -418,6 +419,9 @@ def extract_boxed_answer(solution: str) -> str:
     solution = last_boxed_only_string(solution)
     solution = remove_boxed(solution)
     return solution
+
+def grade_answer_math_verify(given_answer: str, ground_truth: str) -> bool:
+    return verify(given_answer, ground_truth)
 
 
 def grade_answer_sympy(given_answer: str, ground_truth: str) -> bool:

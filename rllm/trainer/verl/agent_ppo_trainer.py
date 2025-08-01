@@ -192,6 +192,23 @@ class AgentPPOTrainer(RayPPOTrainer):
                         final_gen_batch_output, generate_metrics = self.generate_agent_trajectory(timing_raw=timing_raw, meta_info=batch.meta_info)
                         batch = batch.union(final_gen_batch_output)
                         metrics.update(generate_metrics)
+                    
+                    # Compute accuracy for each group and apply filtering
+                    if self.config.data.get("oversample_factor", 1.0) > 1.0:
+                        # Get reward tensor for accuracy computation
+                        if "token_level_scores" in batch.batch:
+                            token_level_scores = batch.batch["token_level_scores"]
+                        else:
+                            raise AssertionError("token_level_scores is required for accuracy-based batch filtering.")
+                        
+                        # Apply accuracy-based filtering
+                        batch = self._compute_group_accuracy_and_filter(batch, token_level_scores)
+                        
+                        # Skip batch if no samples remain after filtering
+                        if len(batch) == 0:
+                            print("Skipping batch - no samples passed accuracy filter")
+                            continue
+                    
 
                     # compute values
                     if self.use_critic or self.use_discriminator:
@@ -997,3 +1014,89 @@ class AgentPPOTrainer(RayPPOTrainer):
             batch.non_tensor_batch["is_pad_step"][idx] = True
 
         return batch
+
+    def _compute_group_accuracy_and_filter(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
+        """
+        Compute accuracy for each group and filter batch to prioritize groups with accuracy 
+        between accuracy_lower_bound and accuracy_upper_bound.
+        
+        Args:
+            batch: DataProto containing the batch data
+            reward_tensor: Tensor of rewards for each sample
+            
+        Returns:
+            Filtered DataProto with prioritized sampling
+        """
+        # Get configuration parameters
+        accuracy_lower_bound = self.config.actor_rollout_ref.rollout.get("accuracy_lower_bound", 0.2)
+        accuracy_upper_bound = self.config.actor_rollout_ref.rollout.get("accuracy_upper_bound", 0.8)
+        oversample_factor = self.config.data.get("oversample_factor", 1.0)
+        rollout_n = self.config.actor_rollout_ref.rollout.n
+        
+        # Group rewards by uid (each uid represents one prompt with multiple responses)
+        uids = batch.non_tensor_batch["uid"]
+        unique_uids = np.unique(uids)
+        
+        # Calculate accuracy for each group
+        group_accuracies = {}
+        for uid in unique_uids:
+            uid_mask = (uids == uid)
+            uid_rewards = reward_tensor[uid_mask].sum(-1)  # Sum rewards for each sequence
+            group_accuracy = torch.mean(uid_rewards).item()
+            group_accuracies[uid] = group_accuracy
+        
+        # Separate groups into preferred and non-preferred
+        preferred_groups = []
+        non_preferred_groups = []
+        
+        for uid in unique_uids:
+            accuracy = group_accuracies[uid]
+            if accuracy_lower_bound <= accuracy <= accuracy_upper_bound:
+                preferred_groups.append(uid)
+            else:
+                non_preferred_groups.append(uid)
+        
+        # Calculate target number of groups to keep
+        target_groups = int(len(unique_uids) // oversample_factor)
+        target_instances = target_groups * rollout_n
+        
+        # Prioritize preferred groups
+        selected_uids = []
+        
+        # First, add all preferred groups
+        selected_uids.extend(preferred_groups)
+        
+        # If we need more groups, randomly sample from non-preferred groups
+        if len(selected_uids) < target_groups:
+            remaining_needed = target_groups - len(selected_uids)
+            if len(non_preferred_groups) > 0:
+                # Randomly sample from non-preferred groups
+                import random
+                random.shuffle(non_preferred_groups)
+                selected_uids.extend(non_preferred_groups[:remaining_needed])
+        
+        # If we have too many groups, truncate to target
+        if len(selected_uids) > target_groups:
+            selected_uids = selected_uids[:target_groups]
+        
+        # Create mask for selected instances
+        selected_mask = torch.zeros(len(uids), dtype=torch.bool)
+        for uid in selected_uids:
+            uid_mask = (uids == uid)
+            selected_mask[uid_mask] = True
+        
+        # Filter batch
+        filtered_batch = batch[selected_mask]
+        
+        # Log statistics
+        total_groups = len(unique_uids)
+        preferred_count = len(preferred_groups)
+        selected_count = len(selected_uids)
+        selected_preferred = len([uid for uid in selected_uids if uid in preferred_groups])
+        
+        print(f"Accuracy filtering: {selected_count}/{total_groups} groups selected "
+              f"({selected_preferred} preferred, {selected_count - selected_preferred} non-preferred)")
+        print(f"Preferred groups: {preferred_count}/{total_groups} "
+              f"({accuracy_lower_bound:.1f}-{accuracy_upper_bound:.1f} accuracy)")
+        
+        return filtered_batch
