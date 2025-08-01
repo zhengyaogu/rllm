@@ -73,7 +73,8 @@ dependencies = [
     "wandb",
     "pybind11",
     "gym",
-    "math-verify"
+    "math-verify[4-9-3]",
+    "latex2sympy2-extended",
 
     # Development and testing
     "pytest",
