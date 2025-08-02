@@ -21,13 +21,13 @@ def prepare_math_data():
         x["source"] in ["big_math", "orca_math", "cn_k12", "olympiads", "math", "aops_forum"]
     ))
     test_dataset = test_dataset.filter(lambda x: (
-        x["source"] in ["gsm8k", "amc_aime", "math", "omnimath", "openmath", "harp"]
+        x["source"] in ["omnimath"]
     ))
     train_dataset = train_dataset.map(preprocess_big_math, with_indices=True)
     test_dataset = test_dataset.map(preprocess_big_math, with_indices=True)
 
     train_dataset = DatasetRegistry.register_dataset("big_math", train_dataset, "train")
-    test_dataset = DatasetRegistry.register_dataset("big_math", test_dataset, "test")
+    test_dataset = DatasetRegistry.register_dataset("omnimath", test_dataset, "train")
     return train_dataset, test_dataset
 
 
