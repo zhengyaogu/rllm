@@ -5,7 +5,7 @@ validate answers when necessary.
 """
 
 from rllm.globals import OAI_RM_MODEL, THOUGHT_DELIMITER_END
-from rllm.rewards.math_utils.utils import extract_answer, grade_answer_mathd, grade_answer_sympy, grade_answer_math_verify
+from rllm.rewards.math_utils.utils import extract_answer, grade_answer_mathd, grade_answer_sympy
 from rllm.rewards.reward_types import RewardConfig, RewardOutput, RewardType
 from rllm.system_prompts import ORM_PROMPT
 from rllm.utils import call_gemini_llm, call_oai_rm_llm
@@ -85,9 +85,7 @@ class RewardMathFn:
 
         # Check against all possible correct answers
         for ground_truth in processed_ground_truths:
-            is_correct = (grade_answer_mathd(model_answer, ground_truth) 
-                          or grade_answer_sympy(model_answer, ground_truth)
-                          or grade_answer_math_verify(model_answer, ground_truth))
+            is_correct = grade_answer_mathd(model_answer, ground_truth) or grade_answer_sympy(model_answer, ground_truth)
             if is_correct:
                 # Apply tool call bonus if applicable and answer is correct
                 reward = self.config.correct_reward
