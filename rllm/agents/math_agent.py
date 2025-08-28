@@ -26,7 +26,12 @@ class MathAgent(BaseAgent):
             # Initial problem presentation
             assert isinstance(observation, dict) and "question" in observation
             question = observation["question"]
-            formatted_observation = f"{question} {self.instruction}"
+            partial_solution = observation["partial_solution"]
+            if partial_solution is not None:
+                print("FOUND PARTIAL SOLUTION")
+                formatted_observation = f"{question} {self.instruction} {partial_solution}"
+            else:
+                formatted_observation = f"{question} {self.instruction}"
         else:
             # Follow-up correction prompt
             formatted_observation = "Your previous answer may contain a mistake. Please review it carefully and answer again. Put your final answer within \\boxed{}."

@@ -25,6 +25,7 @@ data:
 
 actor_rollout_ref:
   hybrid_engine: True
+  manual_sleep_wakeup: False
   model:
     path: ~/models/deepseek-llm-7b-chat
     use_shm: False
@@ -110,6 +111,12 @@ actor_rollout_ref:
     use_fire_sampling: False # https://arxiv.org/abs/2410.21236
     prompt_length: ${data.max_prompt_length}  # not use for opensource
     response_length: ${data.max_response_length}
+    #sampling method
+    sampling_method: greedy
+    disc_max_num_rounds: 4
+    disc_rollout_size_per_round: 4
+    reward_threshold: 1.0
+    alpha0: 0.15
     # for vllm rollout
     dtype: bfloat16 # should align with FSDP
     gpu_memory_utilization: 0.5
@@ -205,13 +212,14 @@ reward_model:
   enable: False
   strategy: fsdp
   model:
-    input_tokenizer: ${actor_rollout_ref.model.path}  # set this to null if the chat template is identical
+    style: prm
+    input_tokenizer: null  # set this to null if the chat template is identical
     path: ~/models/FsfairX-LLaMA3-RM-v0.1
     use_shm: False
     external_lib: ${actor_rollout_ref.model.external_lib}
-    use_remove_padding: False
+    use_remove_padding: ${actor_rollout_ref.model.use_remove_padding}
     use_fused_kernels: ${actor_rollout_ref.model.use_fused_kernels}
-    trust_remote_code: False
+    trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
     fsdp_config:
       wrap_policy:
         min_num_params: 0
@@ -222,8 +230,8 @@ reward_model:
   micro_batch_size_per_gpu: null # set a number
   max_length: null
   ulysses_sequence_parallel_size: 1 # sp size
-  use_dynamic_bsz: ${critic.use_dynamic_bsz}
-  forward_max_token_len_per_gpu: ${critic.forward_max_token_len_per_gpu}
+  use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
+  forward_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
   reward_manager: naive
   launch_reward_fn_async: False # custom reward function executed async on CPU, during log_prob
   sandbox_fusion:
@@ -275,7 +283,7 @@ trainer:
   critic_warmup: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: False
-  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  default_local_dir: /workspace/mnt/temp/checkpoints/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
   # The timeout for ray worker group to wait for the register center to be ready

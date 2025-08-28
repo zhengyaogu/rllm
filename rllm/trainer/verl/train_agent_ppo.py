@@ -51,7 +51,7 @@ def train_agent(config, agent_class=None, env_class=None, agent_args=None, env_a
     if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
         assert config.critic.strategy in ["fsdp", "fsdp2"]
         from verl.single_controller.ray import RayWorkerGroup
-        from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
+        from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker, RewardModelWorker
 
         actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
         ray_worker_group_cls = RayWorkerGroup
@@ -73,6 +73,10 @@ def train_agent(config, agent_class=None, env_class=None, agent_args=None, env_a
         Role.ActorRollout: global_pool_id,
         Role.Critic: global_pool_id,
     }
+
+    if config.reward_model.get("enable", False):
+        role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
+        mapping[Role.RewardModel] = global_pool_id
 
     if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
         role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)

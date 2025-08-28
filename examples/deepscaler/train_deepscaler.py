@@ -10,7 +10,7 @@ from rllm.trainer.agent_trainer import AgentTrainer
 @hydra.main(config_path="pkg://rllm.trainer.config", config_name="ppo_trainer", version_base=None)
 def main(config):
     train_dataset = DatasetRegistry.load_dataset("deepscaler_math", "train")
-    test_dataset = DatasetRegistry.load_dataset("aime2024", "test")
+    test_dataset = DatasetRegistry.load_dataset("aime2425", "test")
 
     env_args = {"reward_fn": math_reward_fn}
 

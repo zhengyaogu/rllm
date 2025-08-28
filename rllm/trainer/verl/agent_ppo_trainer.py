@@ -8,6 +8,10 @@ from functools import reduce
 from pprint import pprint
 from queue import Queue
 from threading import Thread
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Optional, List
+import warnings
 
 import numpy as np
 import torch
@@ -15,7 +19,7 @@ from omegaconf import OmegaConf
 
 from rllm.engine.agent_execution_engine import AsyncAgentExecutionEngine
 from verl import DataProto
-from verl.protocol import pad_dataproto_to_divisor
+from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.trainer.ppo.ray_trainer import (
     RayPPOTrainer,
     RayWorkerGroup,
@@ -29,6 +33,81 @@ from verl.trainer.ppo.ray_trainer import (
     compute_timing_metrics,
     reduce_metrics,
 )
+
+
+@dataclass
+class DISCDataPoint:
+    # we opt to not include the prompt in the data point, since it is already prepared in batch
+    steps: List[str]
+    z_score: float
+    alpha: float
+    num_sampled: int
+
+
+def split_str(s, fraction):
+    '''
+    Splits a string into two parts around the specified fraction of the string.
+    Returns None if the string cannot be split at the specified fraction.
+    '''
+    # Find the index at which to split the string
+    split_index = int(len(s) * fraction)
+    return s[:split_index], s[split_index:]
+
+
+def compute_z_score(
+    batch,
+    epsilon=1e-6
+):
+    index = batch.non_tensor_batch["uid"]
+    if "rm_scores" in batch.batch:
+        token_level_scores = batch.batch["token_level_scores"].sum(dim=-1)
+        rm_scores = torch.sigmoid(batch.batch["rm_scores"].sum(dim=-1)).to(token_level_scores.dtype)
+        correct_mask = token_level_scores == 1.
+        rm_scores[correct_mask] = 1.
+    elif "token_level_scores" in batch.batch:
+        rm_scores = batch.batch["token_level_scores"].sum(dim=-1)
+    else:
+        raise ValueError("No reward scores found in batch")
+    
+    scores = rm_scores
+
+    id2score = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+    uid2batch_idx = defaultdict(list)
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+            uid2batch_idx[index[i]].append(i) # write down index of data point for each uid
+        
+        max_len = 0
+        for idx in id2score:
+            if len(id2score[idx]) > max_len:
+                max_len = len(id2score[idx])
+
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                if max_len == 1:
+                    id2mean[idx] = torch.tensor(0.0)
+                    id2std[idx] = torch.tensor(1.0)
+                else:
+                    id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                    id2std[idx] = torch.tensor(0.0)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+                id2std[idx] = torch.std(torch.tensor([id2score[idx]]))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        
+        for idx in id2score:
+            max_i = max(range(len(id2score[idx])), key=lambda i: id2score[idx][i])
+            id2score[idx] = (id2score[idx][max_i] - id2mean[idx]) / (id2std[idx] + epsilon)
+            uid2batch_idx[idx] = uid2batch_idx[idx][max_i]
+
+
+    return id2score, uid2batch_idx, id2mean, id2std
 
 
 class AgentPPOTrainer(RayPPOTrainer):
@@ -130,6 +209,7 @@ class AgentPPOTrainer(RayPPOTrainer):
         """
         The training loop of PPO. Adapted to train the underlying model of agent.
         """
+        print("Start Training...")
         from verl.utils.tracking import Tracking
 
         logger = Tracking(
@@ -163,10 +243,34 @@ class AgentPPOTrainer(RayPPOTrainer):
             for batch_dict in self.train_dataloader:
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object)
-                batch = batch.repeat(
-                    repeat_times=self.config.actor_rollout_ref.rollout.n,
-                    interleave=True,
-                )
+
+                sampling_method = self.config.actor_rollout_ref.rollout.get("sampling_method", "greedy")
+                if sampling_method == "greedy":
+                    batch = batch.repeat(
+                        repeat_times=self.config.actor_rollout_ref.rollout.n,
+                        interleave=True,
+                    ) # only repeat batch for greedy sampling
+                elif sampling_method == "disc":
+                    # prepare variables for disc sampling
+                    sample_budget = self.config.actor_rollout_ref.rollout.n
+                    iteration_threshold = self.config.actor_rollout_ref.rollout.reward_threshold
+                    alpha = self.config.actor_rollout_ref.rollout.alpha0
+
+                    unique_uids = np.unique(batch.non_tensor_batch["uid"])
+
+                    id2data_points = {}
+                    for uid in unique_uids:
+                        id2data_points[uid] = DISCDataPoint(
+                            steps=[],
+                            z_score=float("inf"),
+                            alpha=alpha,
+                            num_sampled=0
+                        )
+                    remaining_uids = unique_uids.tolist()
+
+                    batch_total = None
+                else:
+                    raise NotImplementedError(f"Sampling method {sampling_method} not supported")
 
                 metrics = {}
                 timing_raw = {}
@@ -177,43 +281,185 @@ class AgentPPOTrainer(RayPPOTrainer):
                 }
 
                 with _timer("step", timing_raw):
-                    self.init_envs_and_agents(batch)
+                    sampling_method = self.config.actor_rollout_ref.rollout.get("sampling_method", "greedy")
+                    if sampling_method == "greedy":
+                        self.init_envs_and_agents(batch)
 
-                    if self.config.agent.use_stepwise_advantage:
-                        final_gen_batch_output = self.generate_agent_steps(timing_raw=timing_raw, meta_info=batch.meta_info, uids=batch.non_tensor_batch["uid"])
-                        repeat_counts = final_gen_batch_output.meta_info["repeat_counts"]
-                        # need to repeat to make shape match
-                        batch = batch.repeat_by_counts(repeat_counts, interleave=True)
-                        final_gen_batch_output.meta_info.pop("repeat_counts", None)  # no longer needed after this
-                        # batch needs to be padded to divisor of world size, we will pad with everything masked out
-                        batch = batch.union(final_gen_batch_output)
-                        batch = self._pad_dataproto_to_world_size(batch=batch)
-                    else:
-                        final_gen_batch_output, generate_metrics = self.generate_agent_trajectory(timing_raw=timing_raw, meta_info=batch.meta_info)
-                        batch = batch.union(final_gen_batch_output)
-                        metrics.update(generate_metrics)
+                        if self.config.agent.use_stepwise_advantage:
+                            final_gen_batch_output = self.generate_agent_steps(timing_raw=timing_raw, meta_info=batch.meta_info, uids=batch.non_tensor_batch["uid"])
+                            repeat_counts = final_gen_batch_output.meta_info["repeat_counts"]
+                            # need to repeat to make shape match
+                            batch = batch.repeat_by_counts(repeat_counts, interleave=True)
+                            final_gen_batch_output.meta_info.pop("repeat_counts", None)  # no longer needed after this
+                            # batch needs to be padded to divisor of world size, we will pad with everything masked out
+                            batch = batch.union(final_gen_batch_output)
+                            batch = self._pad_dataproto_to_world_size(batch=batch)
+                        else:
+                            final_gen_batch_output, generate_metrics = self.generate_agent_trajectory(timing_raw=timing_raw, meta_info=batch.meta_info)
+                            batch = batch.union(final_gen_batch_output)
+                            metrics.update(generate_metrics)
 
-                    # compute values
-                    if self.use_critic:
-                        with _timer("values", timing_raw):
-                            values = self.critic_wg.compute_values(batch)
-                            batch = batch.union(values)
+                        # compute values
+                        if self.use_critic:
+                            with _timer("values", timing_raw):
+                                values = self.critic_wg.compute_values(batch)
+                                batch = batch.union(values)
+                        with _timer("adv", timing_raw):
+                            if self.use_rm:
+                                reward_tensor = self.rm_wg.compute_rm_score(batch)
+                                batch = batch.union(reward_tensor)
+
+                            # reward tensor for env-based trajectory data can be obtained by processing the trajectories
+                            if "token_level_scores" not in batch.batch:
+                                reward_tensor = self.reward_fn(batch)
+                                batch.batch["token_level_scores"] = reward_tensor
+                            else:
+                                reward_tensor = batch.batch["token_level_scores"]  # filled in by environment collected trajectory transformation
+                        
+                    elif sampling_method == "disc":
+                        round_num = 0
+                        
+                        # wake up rollout engine if manual sleep wakeup is enabled
+                        if self.config.actor_rollout_ref.manual_sleep_wakeup:
+                            max_concurrency = self.agent_execution_engine.n_parallel_agents
+                            self.agent_execution_engine.executor = ThreadPoolExecutor(max_workers=max_concurrency)
+
+                            if self.agent_execution_engine.engine_name == "verl":
+                                self.agent_execution_engine.rollout_engine.wake_up()
+
+                        total_traj_remaining = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                        max_num_rounds = self.config.actor_rollout_ref.rollout.disc_max_num_rounds
+                        rollout_size_per_round = self.config.actor_rollout_ref.rollout.disc_rollout_size_per_round
+                        finished_uids = set()
+                        while round_num < max_num_rounds and total_traj_remaining > 0:
+                            print(f"NUM UIDS STILL TO SAMPLE THIS BATCH: {len(unique_uids) - len(finished_uids)}")
+                            remaining_uids = np.array([uid for uid in unique_uids if uid not in finished_uids])
+                            if remaining_uids.shape[0] == 0: # if all uids are finished, sample all uids to make the batch size
+                                remaining_uids = unique_uids.copy()
+                            actual_rollout_size_curr_round, rollout_remainder = total_traj_remaining // remaining_uids.shape[0], total_traj_remaining % remaining_uids.shape[0]
+
+                            # if not the last round sample a pre-designated number of traj for each uid (if available)
+                            # sample evenly (with remainder) if not enough traj for each uid
+                            if round_num < max_num_rounds - 1 and actual_rollout_size_curr_round >= rollout_size_per_round: 
+                                select_mask = np.isin(batch.non_tensor_batch["uid"], remaining_uids)
+                                batch_curr_round = batch.select_idxs(select_mask)
+                                batch_curr_round = batch_curr_round.repeat(
+                                    repeat_times=rollout_size_per_round,
+                                    interleave=True,
+                                )
+                            else: # sample evenly what's remaining, sample remainders randomly
+                                remainder_uids = np.random.choice(remaining_uids, size=rollout_remainder, replace=False)
+                                main_uids = np.array([uid for uid in remaining_uids if uid not in remainder_uids])
+                                remainder_mask = np.isin(batch.non_tensor_batch["uid"], remainder_uids)
+                                main_mask = np.isin(batch.non_tensor_batch["uid"], main_uids)
+                                main_batch = batch.select_idxs(main_mask)
+                                remainder_batch = batch.select_idxs(remainder_mask)
+                                remainder_batch = remainder_batch.repeat(
+                                    repeat_times=actual_rollout_size_curr_round + 1,
+                                    interleave=True,
+                                )
+                                main_batch = main_batch.repeat(
+                                    repeat_times=actual_rollout_size_curr_round,
+                                    interleave=True,
+                                )
+                                batch_curr_round = DataProto.concat([main_batch, remainder_batch])
+                            
+                            # add partial solution if available
+                            for i, uid in enumerate(batch_curr_round.non_tensor_batch["uid"]):
+                                if len(id2data_points[uid].steps) > 0:
+                                    split_last_step, _ = split_str(id2data_points[uid].steps[-1], id2data_points[uid].alpha)
+                                    partial_solution = ''.join(id2data_points[uid].steps[:-1]) + split_last_step
+                                    batch_curr_round.non_tensor_batch["extra_info"][i]["partial_solution"] = partial_solution
+                                else:
+                                    batch_curr_round.non_tensor_batch["extra_info"][i]["partial_solution"] = None
+                            
+                            self.init_envs_and_agents(batch_curr_round)
+                            
+                            # generate trajectory
+                            print("GENERATING TRAJECTORIES...")
+                            assert self.config.agent.use_stepwise_advantage == False, "stepwise advantage is not supported for disc sampling"
+                            final_gen_batch_output, generate_metrics = self.generate_agent_trajectory(timing_raw=timing_raw, meta_info=batch_curr_round.meta_info)
+                            batch_curr_round = batch_curr_round.union(final_gen_batch_output)
+                            metrics.update(generate_metrics)
+
+                            batch_curr_round, pad_size = pad_dataproto_to_divisor(batch_curr_round, self.actor_rollout_wg.world_size) # pad to world size for rm
+
+                            with _timer("adv", timing_raw):
+                                # compute scores using reward model and/or reward function
+                                if self.use_rm:
+                                    reward_tensor = self.rm_wg.compute_rm_score(batch_curr_round)
+                                    batch_curr_round = batch_curr_round.union(reward_tensor)
+                                
+                                batch_curr_round = unpad_dataproto(batch_curr_round, pad_size)
+
+                                # reward tensor for env-based trajectory data can be obtained by processing the trajectories
+                                if "token_level_scores" not in batch_curr_round.batch:
+                                    reward_tensor = self.reward_fn(batch_curr_round)
+                                    batch_curr_round.batch["token_level_scores"] = reward_tensor
+                                else:
+                                    reward_tensor = batch_curr_round.batch["token_level_scores"]  # filled in by environment collected trajectory transformation
+                                
+                                token_level_scores = batch_curr_round.batch["token_level_scores"].sum(dim=-1)
+
+                            for i, uid in enumerate(batch_curr_round.non_tensor_batch["uid"]):
+                                if token_level_scores[i] >= 1:
+                                    finished_uids.add(uid)
+
+                            for uid in batch_curr_round.non_tensor_batch["uid"]:
+                                id2data_points[uid].num_sampled += 1
+                            
+                            id2score, uid2best_batch_idx, id2mean, id2std = compute_z_score(batch_curr_round, epsilon=1e-6)
+                            for uid in id2score:
+                                print(f"ROUND: {round_num}, UID: {uid}, SCORE: {id2score[uid]}, MEAN: {id2mean[uid]}, STD: {id2std[uid]}")
+                            
+                            unique_uids_curr_round = np.unique(batch_curr_round.non_tensor_batch["uid"])
+                            for uid in unique_uids_curr_round:
+                                new_z_score = id2score[uid]
+                                # if new z score is better, or if the last step is too short, update the data point
+                                if new_z_score < id2data_points[uid].z_score or (
+                                    len(id2data_points[uid].steps) > 0 and len(id2data_points[uid].steps[-1]) <= 1
+                                ):
+                                    id2data_points[uid].z_score = new_z_score
+                                    if len(id2data_points[uid].steps) > 0:
+                                        second_last_step, _ = split_str(id2data_points[uid].steps[-1], id2data_points[uid].alpha)
+                                        id2data_points[uid].steps[-1] = second_last_step
+                                        id2data_points[uid].steps.append(
+                                            batch_curr_round.non_tensor_batch["response_strs"][uid2best_batch_idx[uid]]
+                                        )
+                                    else:
+                                        id2data_points[uid].steps.append(
+                                            batch_curr_round.non_tensor_batch["response_strs"][uid2best_batch_idx[uid]]
+                                        )
+                                    id2data_points[uid].alpha = self.config.actor_rollout_ref.rollout.alpha0
+                                else:
+                                    id2data_points[uid].alpha = id2data_points[uid].alpha * self.config.actor_rollout_ref.rollout.alpha0
+                            
+                            if batch_total is None:
+                                batch_total = batch_curr_round
+                            else:
+                                batch_total = DataProto.concat([batch_total, batch_curr_round])
+                            for uid in unique_uids:
+                                print(f"UID: {uid}, NUM SAMPLED: {id2data_points[uid].num_sampled}")
+                            
+                            round_num += 1
+                            total_traj_remaining -= batch_curr_round.non_tensor_batch["uid"].shape[0]
+                        
+                        expected_sample_total = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
+                        if batch_total.non_tensor_batch["uid"].shape[0] != expected_sample_total:
+                            warnings.warn(f"Expected {expected_sample_total} samples, got {batch_total.non_tensor_batch['uid'].shape[0]}")
+                    
+                        if self.config.actor_rollout_ref.manual_sleep_wakeup:
+                            if self.agent_execution_engine.engine_name == "verl":
+                                self.agent_execution_engine.rollout_engine.sleep()
+
+                            self.agent_execution_engine.executor.shutdown(wait=False, cancel_futures=True)
+                    
+                    batch = batch_total
 
                     with _timer("adv", timing_raw):
-                        # compute scores using reward model and/or reward function
-                        if self.use_rm:
-                            reward_tensor = self.rm_wg.compute_rm_score(batch)
-                            batch = batch.union(reward_tensor)
-
-                        # reward tensor for env-based trajectory data can be obtained by processing the trajectories
-                        if "token_level_scores" not in batch.batch:
-                            reward_tensor = self.reward_fn(batch)
-                            batch.batch["token_level_scores"] = reward_tensor
-                        else:
-                            reward_tensor = batch.batch["token_level_scores"]  # filled in by environment collected trajectory transformation
-
                         # Rejection sampling based on rewards
                         # Group rewards by uid
+                        reward_tensor = batch.batch["token_level_scores"]
                         uids = batch.non_tensor_batch["uid"]
                         unique_uids = np.unique(uids)
                         valid_mask = torch.ones(len(uids), dtype=torch.bool)
@@ -336,6 +582,22 @@ class AgentPPOTrainer(RayPPOTrainer):
                         #     batch.batch['token_level_rewards'] = batch.batch['token_level_scores']
 
                         batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+                        if self.config.reward_model.enable:
+                            token_level_scores = batch.batch["token_level_scores"]
+                            rm_scores = batch.batch["rm_scores"].clone().to(dtype=token_level_scores.dtype)
+                            print(torch.count_nonzero(rm_scores, dim=-1))
+                            # assert (torch.count_nonzero(rm_scores, dim=-1) <= 1).all(), \
+                            #     "Each sequence should have at most one non-zero reward score"
+                            # assert token_level_scores.shape == rm_scores.shape, \
+                            #     f"token_level_scores and rm_scores should have the same shape, got {token_level_scores.shape} and {rm_scores.shape}"
+                            # assert (torch.count_nonzero(token_level_scores, dim=-1) <= 1).all(), \
+                            #     "Each sequence should have at most one non-zero reward score"
+                            correct_mask = (token_level_scores.sum(dim=-1) == 1)
+                            rm_scores[correct_mask] = token_level_scores[correct_mask]
+                            print(torch.count_nonzero(rm_scores, dim=-1).max())
+                            # assert (torch.count_nonzero(rm_scores, dim=-1) <= 1).all(), \
+                            #     "Each sequence should have at most one non-zero reward score"
+                            batch.batch["token_level_rewards"] = rm_scores.to(dtype=token_level_scores.dtype)
 
                         if self.config.agent.use_stepwise_advantage:
                             if self.config.agent.stepwise_advantage_mode == "mc_return":
@@ -424,12 +686,20 @@ class AgentPPOTrainer(RayPPOTrainer):
                     return
 
     def _validate_agent(self):
+        if self.config.actor_rollout_ref.manual_sleep_wakeup:
+            max_concurrency = self.agent_execution_engine.n_parallel_agents
+            self.agent_execution_engine.executor = ThreadPoolExecutor(max_workers=max_concurrency)
+
+            if self.agent_execution_engine.engine_name == "verl":
+                self.agent_execution_engine.rollout_engine.wake_up()
         rewards_lst = []
         data_source_lst = []
         uid_lst = []
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
             test_batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object)
+            for i in range(len(test_batch.batch)):
+                test_batch.non_tensor_batch["extra_info"][i]["partial_solution"] = None
             n_val_samples = self.config.actor_rollout_ref.rollout.val_kwargs.n
             test_batch = test_batch.repeat(repeat_times=n_val_samples, interleave=True)
             test_batch.pop(["input_ids", "attention_mask", "position_ids"])  # these are not needed for environment based interaction
@@ -498,6 +768,10 @@ class AgentPPOTrainer(RayPPOTrainer):
             for uid, pass_score in pass_rates.items():
                 pass_k_lst.append(pass_score >= 1)  # assuming 1 means passed
             metric_dict[f"val/test_score/pass@k/{data_source}"] = np.mean(pass_k_lst)
+        
+        if self.config.actor_rollout_ref.manual_sleep_wakeup:
+            if self.agent_execution_engine.engine_name == "verl":
+                self.agent_execution_engine.rollout_engine.sleep()
 
         return metric_dict
 
@@ -577,6 +851,8 @@ class AgentPPOTrainer(RayPPOTrainer):
 
         all_initial_tokens_list = []
         all_response_tokens_list = []
+        all_initial_str_list = []
+        all_response_str_list = []
         all_masks_list = []
         traj_scores = []
         chat_completions = []
@@ -586,10 +862,14 @@ class AgentPPOTrainer(RayPPOTrainer):
         for traj in trajectories:
             prompt_tokens = traj["prompt_tokens"]
             response_tokens = traj["response_tokens"]
+            initial_str = self.tokenizer.decode(prompt_tokens, skip_special_tokens=True)
+            response_str = self.tokenizer.decode(response_tokens, skip_special_tokens=True)
             # test if trajectory is empty
             assert prompt_tokens.numel() != 0 and response_tokens.numel() != 0, f"Both prompt {prompt_tokens.numel()} and response {response_tokens.numel()} of trajectory shouldn't be empty. Please check make sure environment is working and the config"
             all_initial_tokens_list.append(prompt_tokens)
             all_response_tokens_list.append(response_tokens)
+            all_initial_str_list.append(initial_str)
+            all_response_str_list.append(response_str)
             all_masks_list.append(traj["response_masks"])
             traj_scores.append(traj["trajectory_reward"])
             chat_completions.append(traj["chat_completions"])
@@ -657,6 +937,10 @@ class AgentPPOTrainer(RayPPOTrainer):
             last_valid_idx = valid_response_length_sequences[i] - 1
             if last_valid_idx >= 0 and last_valid_idx < score_batch.shape[1]:
                 score_batch[i, last_valid_idx] = traj_score
+        
+        # pack response_str & initial_str as np.array
+        prompt_str_batch = np.array(all_initial_str_list, dtype=object) # (batch_size,)
+        response_str_batch = np.array(all_response_str_list, dtype=object) # (batch_size,)
 
         tensor_batch = {
             "input_ids": trajectory_batch,
@@ -668,9 +952,14 @@ class AgentPPOTrainer(RayPPOTrainer):
             "traj_mask": traj_mask,
         }
 
+        non_tensor_batch = {
+            "response_strs": response_str_batch,
+            "prompt_strs": prompt_str_batch,
+        }
+
         self.visualize_trajectory(DataProto.from_dict(tensors=tensor_batch))
 
-        return DataProto.from_dict(tensors=tensor_batch), metrics
+        return DataProto.from_dict(tensors=tensor_batch, non_tensors=non_tensor_batch), metrics
 
     def visualize_trajectory(self, tensor_batch, sample_idx=0, max_samples=1, mask_key="traj_mask"):
         """
