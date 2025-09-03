@@ -24,7 +24,7 @@ rLLM uses [verl](https://github.com/volcengine/verl) as its training backend. Fo
 
 ```bash
 # Clone the repository
-git clone --recurse-submodules https://github.com/agentica-project/rllm.git
+git clone --recurse-submodules https://github.com/rllm-org/rllm.git
 cd rllm
 
 # create a conda environment
@@ -38,4 +38,4 @@ pip install -e .
 
 This will install rLLM and all its dependencies in development mode.
 
-For more help, refer to the [GitHub issues page](https://github.com/agentica-project/rllm/issues). 
+For more help, refer to the [GitHub issues page](https://github.com/rllm-org/rllm/issues). 

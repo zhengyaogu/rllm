@@ -22,14 +22,14 @@ dependencies = [
     "torch>=2.7",
     "transformers",
     "accelerate",
-    "flash-attn>=2.8.0.post2",
+    "flash-attn>=2.8.0.post2; sys_platform != 'darwin'",  # Skip on macOS
     "sentence-transformers",
     "torchmetrics",
 
     # Training and inference
-    "deepspeed",
-    "vllm>=0.8.3",
-    "sgl-kernel>=0.2.0",
+    "deepspeed; sys_platform != 'darwin'",  # Skip on macOS
+    "vllm>=0.8.3; sys_platform != 'darwin'",  # Skip on macOS
+    "sgl-kernel",
     "sglang>=0.4.8.post1",
     "sglang-router",
     "peft",
@@ -86,6 +86,13 @@ dependencies = [
     "mkdocstrings[python]>=0.24.0",
     "mkdocs-autorefs>=0.5.0",
     "pymdown-extensions>=10.0.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "flash-attn>=2.8.0.post2; sys_platform != 'darwin'",
+    "deepspeed; sys_platform != 'darwin'",
+    "vllm>=0.8.3; sys_platform != 'darwin'",
 ]
 
 [tool.ruff]
