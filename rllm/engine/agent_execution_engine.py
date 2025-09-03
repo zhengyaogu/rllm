@@ -243,6 +243,7 @@ class AgentExecutionEngine:
         llm_time = 0.0
         env_time = 0.0
         reward = 0.0
+        model_output_token_len = 0
 
         # for step return
         episode_steps = []
@@ -354,6 +355,7 @@ class AgentExecutionEngine:
 
             # Update repsonse token length
             response_token_len += len(assistant_msg_tokens) + len(env_msg_tokens)
+            model_output_token_len += len(assistant_msg_tokens)
             # Reached maximum number of tokens for the trajectory
             if not self.enforce_max_prompt_length and response_token_len >= self.max_response_length:
                 # Truncation length
@@ -443,6 +445,8 @@ class AgentExecutionEngine:
                 "trajectory_reward": trajectory.reward,
                 "idx": env.idx,
                 "chat_completions": agent.chat_completions,
+                "response_token_len": model_output_token_len,
+                "prompt_token_len": prompt_token_len,
                 "metrics": {
                     # Total number of steps taken in the trajectory
                     "steps": len(trajectory.steps),
@@ -465,6 +469,8 @@ class AgentExecutionEngine:
                 "trajectory_reward": trajectory.reward,
                 "idx": env.idx,
                 "mc_returns": [step.mc_return for step in trajectory.steps][: len(episode_steps)],
+                "response_token_len": model_output_token_len,
+                "prompt_token_len": prompt_token_len,
             }
             return steps_result
 

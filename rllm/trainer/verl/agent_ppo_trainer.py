@@ -26,6 +26,7 @@ from verl.trainer.ppo.ray_trainer import (
     ResourcePoolManager,
     Role,
     WorkerType,
+    AdvantageEstimator,
     _timer,
     compute_advantage,
     compute_data_metrics,
@@ -453,8 +454,8 @@ class AgentPPOTrainer(RayPPOTrainer):
                                 self.agent_execution_engine.rollout_engine.sleep()
 
                             self.agent_execution_engine.executor.shutdown(wait=False, cancel_futures=True)
-                    
-                    batch = batch_total
+                        
+                        batch = batch_total
 
                     with _timer("adv", timing_raw):
                         # Rejection sampling based on rewards
@@ -585,7 +586,7 @@ class AgentPPOTrainer(RayPPOTrainer):
                         if self.config.reward_model.enable:
                             token_level_scores = batch.batch["token_level_scores"]
                             rm_scores = batch.batch["rm_scores"].clone().to(dtype=token_level_scores.dtype)
-                            print(torch.count_nonzero(rm_scores, dim=-1))
+                            #print(torch.count_nonzero(rm_scores, dim=-1))
                             # assert (torch.count_nonzero(rm_scores, dim=-1) <= 1).all(), \
                             #     "Each sequence should have at most one non-zero reward score"
                             # assert token_level_scores.shape == rm_scores.shape, \
@@ -594,10 +595,28 @@ class AgentPPOTrainer(RayPPOTrainer):
                             #     "Each sequence should have at most one non-zero reward score"
                             correct_mask = (token_level_scores.sum(dim=-1) == 1)
                             rm_scores[correct_mask] = token_level_scores[correct_mask]
-                            print(torch.count_nonzero(rm_scores, dim=-1).max())
+                            #print(torch.count_nonzero(rm_scores, dim=-1).max())
                             # assert (torch.count_nonzero(rm_scores, dim=-1) <= 1).all(), \
                             #     "Each sequence should have at most one non-zero reward score"
                             batch.batch["token_level_rewards"] = rm_scores.to(dtype=token_level_scores.dtype)
+                        
+                        if self.config.reward_model.overlong_buffer.enable:
+                            token_level_scores = batch.batch["token_level_scores"]
+                            correct_idx = token_level_scores.sum(dim=-1) == 1
+                            correct_last_valid_idx = torch.nonzero(token_level_scores, as_tuple=False)[:, 1]
+                            prompt_length = batch.batch["prompts"].shape[1]
+                            attention_mask = batch.batch["attention_mask"]
+                            last_valid_idx = attention_mask[:, prompt_length:].sum(dim=-1) - 1
+
+                            #print("last_valid_idx", last_valid_idx[correct_idx])
+                            #print("correct_last_valid_idx", correct_last_valid_idx)
+                            assert torch.equal(last_valid_idx[correct_idx], correct_last_valid_idx), "last_valid_idx and correct_last_valid_idx should be the same"
+
+                            overlong_penalty = self.compute_overlong_penalty(batch)
+                            #print("overlong_penalty.shape", overlong_penalty.shape)
+                            token_level_rewards = batch.batch["token_level_rewards"]
+                            token_level_rewards[torch.arange(last_valid_idx.shape[0]), last_valid_idx] += overlong_penalty.to(dtype=token_level_scores.dtype)
+                            batch.batch["token_level_rewards"] = token_level_rewards
 
                         if self.config.agent.use_stepwise_advantage:
                             if self.config.agent.stepwise_advantage_mode == "mc_return":
@@ -856,6 +875,8 @@ class AgentPPOTrainer(RayPPOTrainer):
         all_masks_list = []
         traj_scores = []
         chat_completions = []
+        all_response_token_lens = []
+        all_prompt_token_lens = []
         traj_metrics = []
         metrics = {}
 
@@ -873,6 +894,8 @@ class AgentPPOTrainer(RayPPOTrainer):
             all_masks_list.append(traj["response_masks"])
             traj_scores.append(traj["trajectory_reward"])
             chat_completions.append(traj["chat_completions"])
+            all_response_token_lens.append(traj["response_token_len"])
+            all_prompt_token_lens.append(traj["prompt_token_len"])
             traj_metrics.append(traj["metrics"])
 
         # Flatten traj_metrics into a dict of lists
@@ -941,6 +964,8 @@ class AgentPPOTrainer(RayPPOTrainer):
         # pack response_str & initial_str as np.array
         prompt_str_batch = np.array(all_initial_str_list, dtype=object) # (batch_size,)
         response_str_batch = np.array(all_response_str_list, dtype=object) # (batch_size,)
+        response_token_lens_batch = np.array(all_response_token_lens, dtype=np.int32) # (batch_size,)
+        prompt_token_lens_batch = np.array(all_prompt_token_lens, dtype=np.int32) # (batch_size,)
 
         tensor_batch = {
             "input_ids": trajectory_batch,
@@ -955,6 +980,8 @@ class AgentPPOTrainer(RayPPOTrainer):
         non_tensor_batch = {
             "response_strs": response_str_batch,
             "prompt_strs": prompt_str_batch,
+            "response_token_lens": response_token_lens_batch,
+            "prompt_token_lens": prompt_token_lens_batch,
         }
 
         self.visualize_trajectory(DataProto.from_dict(tensors=tensor_batch))
@@ -1258,3 +1285,20 @@ class AgentPPOTrainer(RayPPOTrainer):
             batch.non_tensor_batch["is_pad_step"][idx] = True
 
         return batch
+    
+    def compute_overlong_penalty(self, batch):
+        overlong_buffer_len = self.config.reward_model.overlong_buffer.len
+        max_response_length = self.config.data.max_response_length
+        expected_len = max_response_length - overlong_buffer_len
+        prompt_len = batch.batch["prompts"].shape[1]
+        valid_response_len = np.array([
+            batch[i].batch["attention_mask"][:prompt_len].sum()
+            for i in range(len(batch))
+        ])
+        prompt_token_lens = batch.non_tensor_batch["prompt_token_lens"]
+        exceed_len = (valid_response_len - prompt_token_lens) - max_response_length
+        penalty_factor = self.config.reward_model.overlong_buffer.penalty_factor
+        penalty = np.minimum(-exceed_len / expected_len * penalty_factor, 0)
+        penalty = torch.tensor(penalty, dtype=torch.float32)
+        return penalty
+        

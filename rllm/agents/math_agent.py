@@ -26,7 +26,9 @@ class MathAgent(BaseAgent):
             # Initial problem presentation
             assert isinstance(observation, dict) and "question" in observation
             question = observation["question"]
-            partial_solution = observation["partial_solution"]
+            partial_solution = None
+            if "partial_solution" in observation:
+                partial_solution = observation["partial_solution"]
             if partial_solution is not None:
                 print("FOUND PARTIAL SOLUTION")
                 formatted_observation = f"{question} {self.instruction} {partial_solution}"
