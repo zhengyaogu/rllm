@@ -1301,4 +1301,3 @@ class AgentPPOTrainer(RayPPOTrainer):
         penalty = np.minimum(-exceed_len / expected_len * penalty_factor, 0)
         penalty = torch.tensor(penalty, dtype=torch.float32)
         return penalty
-        
